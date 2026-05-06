@@ -28,16 +28,28 @@ class MMVRDataset(Dataset):
     def __getitem__(self, i):
         base = self.samples[i]
         radar = np.load(base + "_radar.npz")
-        hori = radar["hm_hori"]
-        vert = radar["hm_vert"]
+        hori = radar["hm_hori"].astype(np.float32)
+        vert = radar["hm_vert"].astype(np.float32)
         pose = np.load(base + "_pose.npz")
         kp = pose["kp"][0]
 
-        radar_input = np.stack([hori, vert], axis=0).astype(np.float32)
-        radar_input = radar_input / (np.max(radar_input) + 1e-6)
+        # hm_vert is all-NaN across the dataset; replace before any arithmetic
+        hori = np.nan_to_num(hori, nan=0.0, posinf=0.0, neginf=0.0)
+        vert = np.nan_to_num(vert, nan=0.0, posinf=0.0, neginf=0.0)
+
+        # hm_hori has values in 10M-5B range; clip to p99 then normalize
+        hori = np.clip(hori, 0.0, np.percentile(hori, 99))
+        vert = np.clip(vert, 0.0, np.percentile(vert, 99))
+
+        # parentheses required: division before addition otherwise
+        hori = hori / (np.max(hori) + 1e-6)
+        vert = vert / (np.max(vert) + 1e-6)
+
+        radar_input = np.stack([hori, vert], axis=0)
 
         kp = kp.copy().astype(np.float32)
-        kp[:, 0] *= 128 / 640
+        # kp x maxes at ~260 → source width is 320, not 640
+        kp[:, 0] *= 128 / 320
         kp[:, 1] *= 256 / 480
 
         return (
@@ -115,12 +127,14 @@ print(f"  kp y range (scaled): [{kp0[:,1].min():.2f}, {kp0[:,1].max():.2f}]  "
 print("\n" + "=" * 70)
 print("STEP 3: GT heatmap generation")
 
+VIS_THRESH = 0.3  # visibility is float [0,1]; v > 0 catches near-invisible kps
+
 def make_heatmaps(kp, H=256, W=128, sigma=4):
     maps = np.zeros((17, H, W), dtype=np.float32)
     xx, yy = np.meshgrid(np.arange(W), np.arange(H))
     for i in range(17):
         x, y, v = kp[i]
-        if v > 0:
+        if v > VIS_THRESH:
             maps[i] = np.exp(-((xx - x)**2 + (yy - y)**2) / (2 * sigma**2))
     return torch.tensor(maps, dtype=torch.float32)
 
